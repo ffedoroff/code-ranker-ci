@@ -1,0 +1,152 @@
+# ffedoroff/code-ranker-ci :: .github/workflows/fork-report.yml
+#
+# PRIVILEGED fork-PR handler (P3). Fork PRs cannot obtain an OIDC id-token, so
+# report.yml skips the upload for them and instead publishes the generated HTML
+# as an ORDINARY artifact (phase A). This reusable workflow is phase B: it runs
+# in the BASE-repo context (where id-token + pull-requests:write ARE available),
+# downloads that artifact, treats it as UNTRUSTED data, correlates the PR safely,
+# performs the privileged OIDC upload, and posts the sticky comment.
+#
+# SECURITY MODEL (read before editing -- a mistake here is RCE-with-base-
+# privileges or secret exfiltration):
+#
+#   * NEVER use pull_request_target anywhere in this flow. It runs in base
+#     context with full token/secrets while pointing at fork code -- the classic
+#     escalation vector. The trigger is declared as `workflow_run` in the
+#     client's thin stub; this reusable workflow is invoked via workflow_call.
+#   * The downloaded artifact is produced in fork context => UNTRUSTED. We NEVER
+#     execute anything from it: no scripts, no eval, no npm/cargo/make over the
+#     unpacked dir, no checkout of fork head. The HTML is an opaque byte blob we
+#     only read and forward.
+#   * We validate SHAPE, not content: size cap + exactly one expected
+#     report-*.html file. HTML sanitization is NOT attempted -- viewer isolation
+#     (separate reports.<domain> origin) is what contains the blob, not scrubbing.
+#   * The PR number is correlated from GitHub-controlled workflow_run metadata
+#     (head_sha) via the base-repo REST API -- NEVER from the artifact, which a
+#     malicious fork could forge to make us comment on someone else's PR.
+#
+# The caller stub (in the CLIENT repo, added by onboarding) declares:
+#   on:
+#     workflow_run:
+#       workflows: ["code-ranker"]
+#       types: [completed]
+#   jobs.publish:
+#     if: >-
+#       github.event.workflow_run.event == 'pull_request' &&
+#       github.event.workflow_run.head_repository.full_name != github.repository
+#     uses: ffedoroff/code-ranker-ci/.github/workflows/fork-report.yml@v1
+#     permissions:
+#       id-token: write
+#       pull-requests: write
+#       actions: read
+#       contents: read
+name: code-ranker report (fork)
+
+on:
+  workflow_call:
+    inputs:
+      api_url:
+        description: Optional override for the upload endpoint (see report.yml).
+        required: false
+        type: string
+
+# Same loud placeholder as report.yml -- replace with the real domain at publish.
+env:
+  API_UPLOAD_URL: "https://api.REPLACE_ME/upload" # replace with the real domain at publish time
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    continue-on-error: true # advisory: never break the client's CI
+    # Permissions come from the caller stub: id-token: write, pull-requests:
+    # write, actions: read, contents: read. We intentionally do NOT checkout
+    # fork code in this job.
+    steps:
+      # 1) Download the UNTRUSTED artifact from the triggering run.
+      - name: Download fork artifact (untrusted)
+        uses: actions/download-artifact@v4
+        with:
+          name: code-ranker-fork-report
+          path: ck-fork-in
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      # 2) Validate SHAPE only -- size + exactly one report-*.html. Never execute
+      #    anything from the unpacked directory.
+      - name: Validate artifact (shape only, never execute)
+        id: validate
+        env:
+          MAX_BYTES: "5242880" # 5 MB, same cap as the backend upload endpoint
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(ck-fork-in/report-*.html)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "unexpected artifact layout (expected exactly one report-*.html)" >&2
+            exit 1
+          fi
+          HTML="${files[0]}"
+          BYTES=$(wc -c < "$HTML")
+          if [ "$BYTES" -gt "$MAX_BYTES" ]; then
+            echo "artifact too large: $BYTES bytes" >&2
+            exit 1
+          fi
+          echo "html=$HTML" >> "$GITHUB_OUTPUT"
+
+      # 3) Correlate the PR number SAFELY from GitHub metadata (head_sha) via the
+      #    base-repo REST API -- NOT from the artifact. workflow_run.pull_requests
+      #    is unreliable for forks, so we resolve by head_sha. If no single open
+      #    PR is found, we skip (never comment blindly).
+      - name: Resolve PR number from workflow_run metadata
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          PR=$(gh api \
+            "repos/${{ github.repository }}/commits/${HEAD_SHA}/pulls" \
+            -H "Accept: application/vnd.github+json" \
+            --jq '[.[] | select(.state=="open")] | first | .number // empty')
+          if [ -z "$PR" ]; then
+            echo "no open PR for head_sha=$HEAD_SHA; skipping" >&2
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "number=$PR" >> "$GITHUB_OUTPUT"
+
+      # 4) Privileged upload via OIDC (available now -- base context). The HTML
+      #    is passed as an opaque blob; we never render or parse it. Backend
+      #    derives identity from the BASE repo's verified OIDC claims, so the
+      #    report correctly belongs to the base repo, not the fork.
+      - name: Upload to code-ranker (OIDC, keyless)
+        if: steps.pr.outputs.found == 'true'
+        id: up
+        env:
+          HTML: ${{ steps.validate.outputs.html }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          API_URL: ${{ inputs.api_url != '' && inputs.api_url || env.API_UPLOAD_URL }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=code-ranker-reports" \
+            | jq -r .value)
+          URL=$(curl -sS -X POST "$API_URL" \
+            -H "Authorization: Bearer $TOKEN" \
+            -F "pr=${PR_NUMBER}" \
+            -F "report=@${HTML};type=text/html" \
+            | jq -r .url)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # 5) Sticky comment INTO the fork PR. Base context holds pull-requests:
+      #    write; an explicit `number` targets the resolved PR. This writes PR
+      #    metadata (a comment) -- it does not execute fork code.
+      - name: Sticky comment on fork PR
+        if: steps.pr.outputs.found == 'true' && steps.up.outputs.url != ''
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: code-ranker
+          number: ${{ steps.pr.outputs.number }}
+          message: "code-ranker report: ${{ steps.up.outputs.url }}"

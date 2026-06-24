@@ -1,0 +1,134 @@
+# ffedoroff/code-ranker-ci :: .github/workflows/report.yml
+#
+# Reusable workflow that runs on the CLIENT's runner, generates a code-ranker
+# HTML report and keyless-uploads it to the code-ranker Reports backend over OIDC.
+# There is NO secret in this file: identity is proven entirely via a short-lived
+# GitHub OIDC token with a custom audience. All receiving logic lives in the
+# private backend.
+#
+# Clients never edit this file. They pin a thin caller stub at `@v1`; we ship
+# changes centrally by moving the `v1` tag.
+name: code-ranker report
+
+on:
+  workflow_call:
+    inputs:
+      api_url:
+        description: >-
+          Optional override for the upload endpoint. If unset, the env default
+          below is used. Provided so the backend / self-hosting can point at a
+          different domain without editing this file.
+        required: false
+        type: string
+
+env:
+  API_UPLOAD_URL: "https://api.code-ranker.com/upload"
+
+# One in-flight run per PR/ref; a new push to the same branch cancels the
+# previous one so the sticky comment does not race.
+concurrency:
+  group: code-ranker-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    runs-on: ubuntu-22.04
+    continue-on-error: true # advisory mode: never break the client's CI
+    # Permissions are declared by the CALLER stub (a reusable workflow cannot
+    # widen them). The stub must grant: id-token: write, contents: read,
+    # pull-requests: write.
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install code-ranker: PRIMARY path is the precompiled binary via the
+      # shell installer. One step, seconds, no Rust toolchain and no rust-cache
+      # for the (usually non-Rust) target repository.
+      - name: Install code-ranker (prebuilt binary)
+        run: |
+          curl -fsSL https://github.com/ffedoroff/code-ranker/releases/latest/download/code-ranker-installer.sh | sh
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # ALTERNATIVE -- build from source via cargo install (only when prebuilt
+      # release artifacts are unavailable or a source build is required). Only
+      # this path needs the Rust toolchain and rust-cache. To use it, replace
+      # the "Install code-ranker (prebuilt binary)" step above with this block:
+      #
+      #   - uses: dtolnay/rust-toolchain@stable
+      #   - uses: Swatinem/rust-cache@v2
+      #   - name: Install code-ranker (cargo)
+      #     run: cargo install code-ranker --locked
+
+      # Generate the report. A detached checkout in Actions loses git metadata,
+      # so branch/commit/origin are passed explicitly from Actions variables.
+      - name: Analyze -> HTML
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # short SHA, reused by the upload step to reference the same file
+          H="$(git rev-parse --short=12 HEAD)"; echo "H=$H" >> "$GITHUB_ENV"
+          # GITHUB_HEAD_REF is set only for pull_request (the PR head branch);
+          # for push it is empty, so fall back to GITHUB_REF_NAME.
+          BR="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          code-ranker report . \
+            --git.branch="$BR" \
+            --git.commit="${PR_HEAD_SHA:-$GITHUB_SHA}" \
+            --git.dirty-files=0 \
+            --git.origin="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --output.html.path="report-${H}.html"
+
+      # Compute the violations count for the README badge / upload metadata.
+      # `check` may exit non-zero when violations exist; never let that fail the
+      # job (|| true). JSON output is either an array of violations or an object
+      # { verdict, violations: [...] }; jq handles both and counts the array.
+      - name: Count violations
+        run: |
+          set -uo pipefail
+          JSON="$(code-ranker check . --output-format json 2>/dev/null || true)"
+          if [ -z "$JSON" ]; then
+            VIOLATIONS=0
+          else
+            VIOLATIONS="$(printf '%s' "$JSON" | jq 'if type=="array" then length else (.violations | length) end' 2>/dev/null || echo 0)"
+          fi
+          echo "VIOLATIONS=${VIOLATIONS:-0}" >> "$GITHUB_ENV"
+
+      # Same-repo only: a fork PR gets NO id-token, so this step is skipped for
+      # forks (the `if` below is the safety net; the privileged fork path is a
+      # separate workflow_run handler -- see fork-report.yml).
+      - name: Upload to code-ranker (OIDC, keyless)
+        if: >-
+          github.event.pull_request.head.repo.full_name == github.repository
+          || github.event_name == 'push'
+        id: up
+        env:
+          # input override wins; otherwise the env default placeholder above
+          API_URL: ${{ inputs.api_url != '' && inputs.api_url || env.API_UPLOAD_URL }}
+        run: |
+          set -euo pipefail
+          # 1) request an OIDC token with OUR custom audience. The two env vars
+          #    below are exposed by GitHub ONLY when the job has id-token: write.
+          #    The URL already carries query params, so audience is added with &.
+          TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=code-ranker-reports" \
+            | jq -r .value)
+          # 2) POST the HTML + JWT; backend verifies the token and returns a URL.
+          #    pr/violations are display metadata only; the backend derives
+          #    identity (owner/repo) from verified OIDC claims, never the body.
+          URL=$(curl -sS -X POST "$API_URL" \
+            -H "Authorization: Bearer $TOKEN" \
+            -F "pr=${{ github.event.pull_request.number }}" \
+            -F "violations=${VIOLATIONS}" \
+            -F "report=@report-${H}.html;type=text/html" \
+            | jq -r .url)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # Comment only on PRs and only when an upload actually returned a URL, so
+      # a skipped (fork) or failed upload never posts a broken link. Updates the
+      # same comment in place by header instead of spamming a new one per push.
+      - name: Sticky comment
+        if: github.event_name == 'pull_request' && steps.up.outputs.url != ''
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: code-ranker
+          message: "code-ranker report: ${{ steps.up.outputs.url }}"

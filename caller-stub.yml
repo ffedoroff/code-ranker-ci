@@ -1,0 +1,77 @@
+# .github/workflows/code-ranker.yml
+#
+# Thin caller stub. Copy this into your repository as
+# `.github/workflows/code-ranker.yml`. This is the EXACT file the code-ranker
+# onboarding PR adds for you -- all real logic lives in the reusable workflow
+# pinned at @v1, so you never have to touch it again. We ship updates by moving
+# the v1 tag.
+#
+# No secrets are required: identity is proven via keyless OIDC.
+name: code-ranker
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  report:
+    uses: ffedoroff/code-ranker-ci/.github/workflows/report.yml@v1
+    permissions:
+      id-token: write        # OIDC, keyless -- no secret needed
+      contents: read         # checkout your code for analysis
+      pull-requests: write   # sticky comment with the report link
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: fork-PR support
+# -----------------------------------------------------------------------------
+# Fork PRs cannot get an OIDC id-token, so the reusable workflow above cannot
+# upload directly for them. To support fork PRs you need TWO extra pieces:
+#
+#   1) A phase-A step in this same workflow that, for fork PRs, publishes the
+#      generated HTML as an ORDINARY artifact (no OIDC, no secrets). Because the
+#      analysis runs inside the reusable workflow, the simplest way to add this
+#      is to NOT use `uses:` for the report job and instead inline the steps;
+#      most users do not need fork support and can ignore this section.
+#
+#      If you do inline the job, append these two steps after the analysis step
+#      (they only fire for fork PRs, where the same-repo upload was skipped):
+#
+#        - name: Stage fork-PR report
+#          if: >-
+#            github.event_name == 'pull_request' &&
+#            github.event.pull_request.head.repo.full_name != github.repository
+#          run: |
+#            mkdir -p ck-fork-out
+#            cp "report-${H}.html" "ck-fork-out/report-${H}.html"
+#        - name: Upload fork-PR artifact (no OIDC, no secrets)
+#          if: >-
+#            github.event_name == 'pull_request' &&
+#            github.event.pull_request.head.repo.full_name != github.repository
+#          uses: actions/upload-artifact@v4
+#          with:
+#            name: code-ranker-fork-report
+#            path: ck-fork-out/
+#            if-no-files-found: error
+#            retention-days: 1
+#
+#   2) A SECOND workflow file `.github/workflows/code-ranker-fork.yml` in this
+#      repo that runs in the privileged base context via `workflow_run` and
+#      delegates to the fork handler. It MUST live in this repo (a workflow_run
+#      trigger can only listen to workflows in the same repo). NEVER use
+#      pull_request_target. Contents:
+#
+#        name: code-ranker (fork PR)
+#        on:
+#          workflow_run:
+#            workflows: ["code-ranker"]   # must match `name:` above
+#            types: [completed]
+#        jobs:
+#          publish:
+#            if: >-
+#              github.event.workflow_run.event == 'pull_request' &&
+#              github.event.workflow_run.head_repository.full_name != github.repository
+#            uses: ffedoroff/code-ranker-ci/.github/workflows/fork-report.yml@v1
+#            permissions:
+#              id-token: write          # OIDC -- available in base context
+#              pull-requests: write     # sticky comment into the fork PR
+#              actions: read            # download the artifact from the run
+#              contents: read
