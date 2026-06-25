@@ -1,26 +1,27 @@
 # code-ranker-ci
 
-Reusable GitHub Actions workflow для **code-ranker Reports**. Подключается одним
-тонким файлом, генерирует HTML-отчёт `code-ranker` на вашем CI и публикует ссылку
-на него прямо в Pull Request — без секретов, через keyless OIDC.
+Reusable GitHub Actions workflow for **code-ranker Reports**. Drop in one file, get an HTML report generated on your CI and posted as a sticky PR comment — no secrets, keyless OIDC.
 
-Это часть продукта [code-ranker](https://github.com/ffedoroff/code-ranker) Reports.
+Part of the [code-ranker](https://github.com/ffedoroff/code-ranker) Reports product.
 
-## Что это
+## License
 
-При каждом Pull Request (и при push в `main`) workflow:
+Proprietary. This repository may only be used to integrate your repositories with the code-ranker service. All other uses are prohibited. See [LICENSE](LICENSE) for details.
 
-1. устанавливает `code-ranker` (прекомпилированный бинарь, секунды),
-2. строит самодостаточный HTML-отчёт по вашему коду,
-3. keyless-загружает его в backend по OIDC,
-4. оставляет sticky-комментарий в PR со ссылкой на отчёт (обновляется на месте,
-   не плодит новые комментарии на каждый push).
+## How it works
 
-Режим **рекомендательный** (`continue-on-error`): workflow никогда не роняет ваш CI.
+On every pull request (and `main` push) the workflow:
 
-## Как подключить
+1. Installs `code-ranker` (precompiled binary, seconds)
+2. Builds a self-contained HTML report for your code
+3. Uploads it keylessly via OIDC
+4. Posts a sticky PR comment with the link (updates in place, never duplicates)
 
-Скопируйте стаб в свой репозиторий как `.github/workflows/code-ranker.yml`:
+Advisory mode (`continue-on-error`): never breaks your CI.
+
+## Setup
+
+Copy the stub into your repo as `.github/workflows/code-ranker.yml`:
 
 ```yaml
 name: code-ranker
@@ -32,56 +33,39 @@ jobs:
   report:
     uses: ffedoroff/code-ranker-ci/.github/workflows/report.yml@v1
     permissions:
-      id-token: write        # OIDC, keyless — секрет не нужен
-      contents: read         # checkout кода для анализа
-      pull-requests: write   # sticky-комментарий со ссылкой
+      id-token: write        # OIDC keyless — no secret needed
+      contents: read
+      pull-requests: write   # sticky comment
 ```
 
-Если репозиторий устанавливался через GitHub App, этот файл уже добавлен
-онбординг-PR — копировать вручную не нужно.
+If your default branch isn't `main`, update the `push` branches list.
 
-Если ваша default-ветка не `main`, поправьте список веток в `push`.
+> If installed via GitHub App, this file is already added by the onboarding PR.
 
-### Keyless OIDC — почему нет секретов
+## Keyless OIDC — why no secrets
 
-Идентичность запуска доказывается короткоживущим OIDC-токеном GitHub Actions
-(audience `code-ranker-reports`), а не хранимым API-ключом. Поэтому:
+GitHub Actions issues a short-lived OIDC token (audience `code-ranker-reports`) that proves the run's identity. Nothing goes in **Settings → Secrets**. The token lives minutes and is only accepted by our service.
 
-- ничего не нужно добавлять в **Settings → Secrets**;
-- права `id-token: write` объявляются в стабе (это право *запросить выпуск*
-  подписанного токена, а не право писать в репозиторий);
-- токен живёт минуты и принимается только нашим сервисом.
+## Versioning `@v1`
 
-## Версионирование `@v1`
+The stub pins the floating major tag `@v1`. Compatible improvements (new analysis flags, install speed, fixes) land automatically — we move `v1` to new releases.
 
-Стаб пинит плавающий мажорный тег `@v1`. Вы автоматически получаете совместимые
-улучшения (новые флаги анализа, ускорение установки, фиксы) без правок в своём
-репозитории — мы перемещаем тег `v1` на новый релиз.
+- Backwards-compatible changes → patch/minor release, `v1` tag follows.
+- Breaking changes → new major `v2`; **`v1` never breaks in place**.
 
-- Обратно совместимые изменения → новый патч/минор, теги `v1`/`v1.x` переезжают.
-- Ломающие изменения → новый мажор `v2`; **`v1` никогда не ломается на месте**.
+For full reproducibility, pin to a SHA and use Dependabot:  
+`uses: ffedoroff/code-ranker-ci/.github/workflows/report.yml@<sha>`
 
-Командам, которым нужна полная воспроизводимость, доступен opt-in SHA-пиннинг:
-`uses: ffedoroff/code-ranker-ci/.github/workflows/report.yml@<sha>` плюс
-Dependabot для контролируемых обновлений.
+## Fork PRs
 
-## Pull Request из форков
+Forks don't receive an OIDC token from GitHub, so direct upload isn't possible. Fork support uses a separate privileged path via `workflow_run`: phase A builds the HTML as a plain artifact (no secrets); phase B runs in the base-repo context, uploads, and comments. **`pull_request_target` is never used.**
 
-Форк-PR не получает OIDC-токен от GitHub, поэтому прямая загрузка для него
-невозможна. Поддержка форков строится отдельным привилегированным путём через
-триггер `workflow_run` (фаза A собирает HTML обычным артефактом без секретов;
-фаза B в контексте base-репозитория делает привилегированную загрузку и
-комментарий). **`pull_request_target` не используется никогда.**
+Most repos don't need this. If you do — see `caller-stub.yml` comments: add an upload-artifact step and a second stub `.github/workflows/code-ranker-fork.yml` that delegates to `ffedoroff/code-ranker-ci/.github/workflows/fork-report.yml@v1`.
 
-Большинству репозиториев это не нужно. Если нужно — см. комментарии в
-`caller-stub.yml`: добавляется upload-artifact шаг и второй тонкий файл
-`.github/workflows/code-ranker-fork.yml`, делегирующий в
-`ffedoroff/code-ranker-ci/.github/workflows/fork-report.yml@v1`.
+## Repository files
 
-## Файлы этого репозитория
-
-| Файл | Роль |
+| File | Role |
 |---|---|
-| `.github/workflows/report.yml` | reusable workflow — основной same-repo путь |
-| `.github/workflows/fork-report.yml` | reusable workflow — привилегированный fork-PR обработчик (фаза B) |
-| `caller-stub.yml` | тонкий стаб, который вы кладёте в свой репозиторий |
+| `.github/workflows/report.yml` | Reusable workflow — same-repo path |
+| `.github/workflows/fork-report.yml` | Reusable workflow — fork PR handler (phase B) |
+| `caller-stub.yml` | Stub to copy into your repository |

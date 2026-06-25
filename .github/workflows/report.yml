@@ -112,16 +112,27 @@ jobs:
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=code-ranker-reports" \
             | jq -r .value)
-          # 2) POST the HTML + JWT; backend verifies the token and returns a URL.
-          #    pr/violations are display metadata only; the backend derives
-          #    identity (owner/repo) from verified OIDC claims, never the body.
-          URL=$(curl -sS -X POST "$API_URL" \
+          # 2) POST the HTML + JWT. Capture body + HTTP status so we can surface
+          #    a clear, actionable error when the account isn't activated.
+          OUT=$(curl -sS -w $'\n%{http_code}' -X POST "$API_URL" \
             -H "Authorization: Bearer $TOKEN" \
             -F "pr=${{ github.event.pull_request.number }}" \
             -F "violations=${VIOLATIONS}" \
-            -F "report=@report-${H}.html;type=text/html" \
-            | jq -r .url)
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
+            -F "report=@report-${H}.html;type=text/html")
+          CODE="${OUT##*$'\n'}"; BODY="${OUT%$'\n'*}"
+          if [ "$CODE" = "200" ]; then
+            URL=$(printf '%s' "$BODY" | jq -r .url)
+            echo "url=$URL" >> "$GITHUB_OUTPUT"
+          elif [ "$CODE" = "403" ] && printf '%s' "$BODY" | jq -e '.error=="needs_email_verification"' >/dev/null 2>&1; then
+            # Account not activated -> loud, actionable error in the job log.
+            MSG=$(printf '%s' "$BODY" | jq -r '.message')
+            DASH=$(printf '%s' "$BODY" | jq -r '.dashboard_url')
+            echo "::error title=code-ranker not activated::${MSG} Activate here: ${DASH}"
+            echo "verify_url=${DASH}" >> "$GITHUB_OUTPUT"
+            exit 1   # fails this step; the job is continue-on-error so the build stays green
+          else
+            echo "::warning title=code-ranker upload failed::HTTP ${CODE}: ${BODY}"
+          fi
 
       # Comment only on PRs and only when an upload actually returned a URL, so
       # a skipped (fork) or failed upload never posts a broken link. Updates the
@@ -132,3 +143,11 @@ jobs:
         with:
           header: code-ranker
           message: "code-ranker report: ${{ steps.up.outputs.url }}"
+
+      # If the account isn't activated, nudge in the PR with the activation link.
+      - name: Sticky comment (activate)
+        if: github.event_name == 'pull_request' && steps.up.outputs.verify_url != ''
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: code-ranker
+          message: "🔒 code-ranker is set up but not activated. Activate your email to publish reports: ${{ steps.up.outputs.verify_url }}"

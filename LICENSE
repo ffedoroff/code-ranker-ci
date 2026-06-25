@@ -1,0 +1,26 @@
+Copyright (c) 2026 All rights reserved.
+
+PROPRIETARY LICENSE
+
+Permission is hereby granted, free of charge, to any person or organization
+("User") to use the files in this repository solely for the purpose of
+integrating their own source code repositories with the code-ranker service
+(https://github.com/ffedoroff/code-ranker).
+
+Permitted use:
+  - Copying and adding the provided workflow stub files to your own repositories
+    in order to enable code-ranker Reports on your CI/CD pipelines.
+
+All other uses are strictly prohibited, including but not limited to:
+  - Redistributing, sublicensing, or selling this software or any derivative
+    works, in whole or in part.
+  - Modifying and publishing the workflow logic for purposes unrelated to
+    code-ranker integration.
+  - Using this software as part of a competing product or service.
+  - Incorporating this software into any project that does not use the
+    code-ranker service.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION
+WITH THE SOFTWARE OR ITS USE.

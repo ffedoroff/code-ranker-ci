@@ -50,9 +50,8 @@ on:
         required: false
         type: string
 
-# Same loud placeholder as report.yml -- replace with the real domain at publish.
 env:
-  API_UPLOAD_URL: "https://api.REPLACE_ME/upload" # replace with the real domain at publish time
+  API_UPLOAD_URL: "https://api.code-ranker.com/upload"
 
 jobs:
   publish:
@@ -133,12 +132,19 @@ jobs:
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=code-ranker-reports" \
             | jq -r .value)
-          URL=$(curl -sS -X POST "$API_URL" \
+          OUT=$(curl -sS -w $'\n%{http_code}' -X POST "$API_URL" \
             -H "Authorization: Bearer $TOKEN" \
             -F "pr=${PR_NUMBER}" \
-            -F "report=@${HTML};type=text/html" \
-            | jq -r .url)
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
+            -F "report=@${HTML};type=text/html")
+          CODE="${OUT##*$'\n'}"; BODY="${OUT%$'\n'*}"
+          if [ "$CODE" = "200" ]; then
+            echo "url=$(printf '%s' "$BODY" | jq -r .url)" >> "$GITHUB_OUTPUT"
+          elif [ "$CODE" = "403" ] && printf '%s' "$BODY" | jq -e '.error=="needs_email_verification"' >/dev/null 2>&1; then
+            echo "::error title=code-ranker not activated::$(printf '%s' "$BODY" | jq -r '.message') Activate here: $(printf '%s' "$BODY" | jq -r '.dashboard_url')"
+            exit 1
+          else
+            echo "::warning title=code-ranker upload failed::HTTP ${CODE}: ${BODY}"
+          fi
 
       # 5) Sticky comment INTO the fork PR. Base context holds pull-requests:
       #    write; an explicit `number` targets the resolved PR. This writes PR
