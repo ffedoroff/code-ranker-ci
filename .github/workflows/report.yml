@@ -58,6 +58,13 @@ jobs:
       #   - name: Install code-ranker (cargo)
       #     run: cargo install code-ranker --locked
 
+      # Rust projects: warm cargo's local registry so `cargo metadata --offline`
+      # (used by code-ranker's Rust plugin) succeeds. The ubuntu-22.04 runner
+      # ships cargo; this step is a no-op for non-Rust repos.
+      - name: Warm Cargo cache (Rust projects)
+        if: hashFiles('Cargo.toml') != ''
+        run: cargo fetch --manifest-path Cargo.toml
+
       # Generate the report. A detached checkout in Actions loses git metadata,
       # so branch/commit/origin are passed explicitly from Actions variables.
       - name: Analyze -> HTML
