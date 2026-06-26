@@ -1,97 +1,125 @@
 # ffedoroff/code-ranker-ci :: .github/workflows/report.yml
 #
-# Reusable workflow that runs on the CLIENT's runner, generates a code-ranker
-# HTML report and keyless-uploads it to the code-ranker Reports backend over OIDC.
-# There is NO secret in this file: identity is proven entirely via a short-lived
-# GitHub OIDC token with a custom audience. All receiving logic lives in the
-# private backend.
+# Reusable workflow, run on the CLIENT's runner. For ONE language (the `language`
+# input) it analyzes the repo ONCE into a JSON snapshot, then derives from that
+# single snapshot:
+#   - the advisory HTML report, keyless-uploaded to the backend over OIDC. Never
+#     fails the build (per-step continue-on-error), and
+#   - the lint "check" verdict: a non-zero exit on violations turns the job RED so
+#     a language's job can be made a REQUIRED status check in branch protection.
 #
-# Clients never edit this file. They pin a thin caller stub at `@v1`; we ship
-# changes centrally by moving the `v1` tag.
-name: code-ranker report
+# Re-reading the snapshot for the check means `cargo metadata` / source parsing
+# run at most ONCE per job, not twice. Callers fan out one job per language with a
+# matrix, each calling this file with a different `language`. There is NO secret
+# here: identity is keyless OIDC. Clients pin a thin caller stub at @v1; we ship
+# changes centrally by moving the v1 tag.
+name: code-ranker
 
 on:
   workflow_call:
     inputs:
-      api_url:
+      language:
         description: >-
-          Optional override for the upload endpoint. If unset, the env default
-          below is used. Provided so the backend / self-hosting can point at a
-          different domain without editing this file.
+          code-ranker plugin to run: rust | javascript | typescript | python |
+          go | c | cpp | csharp | markdown. Empty = auto-detect (the legacy
+          single-plugin behaviour; errors in multi-language repos).
         required: false
         type: string
+        default: ""
+      do_report:
+        description: Generate + upload the advisory HTML report (never fails CI).
+        required: false
+        type: boolean
+        default: true
+      do_check:
+        description: >-
+          Run the lint gate. When true, violations make THIS job red so it can be
+          required in branch protection. When false the job stays advisory.
+        required: false
+        type: boolean
+        default: false
+      comment:
+        description: Post / update the sticky PR comment with the report link.
+        required: false
+        type: boolean
+        default: true
+      api_url:
+        description: Optional override for the upload endpoint.
+        required: false
+        type: string
+        default: ""
 
 env:
   API_UPLOAD_URL: "https://api.code-ranker.com/upload"
 
-# One in-flight run per PR/ref; a new push to the same branch cancels the
-# previous one so the sticky comment does not race.
+# One in-flight run per PR/ref PER LANGUAGE. The language must be in the group key
+# or concurrent matrix jobs (rust, js, ...) of the same PR would cancel each other.
 concurrency:
-  group: code-ranker-${{ github.event.pull_request.number || github.ref }}
+  group: code-ranker-${{ inputs.language }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  report:
+  code-ranker:
+    name: ${{ inputs.language || 'code-ranker' }}
     runs-on: ubuntu-22.04
-    continue-on-error: true # advisory mode: never break the client's CI
-    # Permissions are declared by the CALLER stub (a reusable workflow cannot
-    # widen them). The stub must grant: id-token: write, contents: read,
-    # pull-requests: write.
+    # No job-level continue-on-error: the advisory steps (report/upload/comment)
+    # opt out per-step, so ONLY the check gate can fail the job. Permissions are
+    # declared by the CALLER stub (a reusable workflow cannot widen them):
+    # id-token: write, contents: read, pull-requests: write.
     steps:
       - uses: actions/checkout@v4
 
-      # Install code-ranker: PRIMARY path is the precompiled binary via the
-      # shell installer. One step, seconds, no Rust toolchain and no rust-cache
-      # for the (usually non-Rust) target repository.
+      # Install code-ranker: prebuilt binary via the shell installer. One step,
+      # seconds, no Rust toolchain for the (usually non-Rust) target repo.
       - name: Install code-ranker (prebuilt binary)
         run: |
           curl -fsSL https://github.com/ffedoroff/code-ranker/releases/latest/download/code-ranker-installer.sh | sh
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      # ALTERNATIVE -- build from source via cargo install (only when prebuilt
-      # release artifacts are unavailable or a source build is required). Only
-      # this path needs the Rust toolchain and rust-cache. To use it, replace
-      # the "Install code-ranker (prebuilt binary)" step above with this block:
-      #
-      #   - uses: dtolnay/rust-toolchain@stable
-      #   - uses: Swatinem/rust-cache@v2
-      #   - name: Install code-ranker (cargo)
-      #     run: cargo install code-ranker --locked
-
-      # Rust projects: warm cargo's local registry so `cargo metadata --offline`
-      # (used by code-ranker's Rust plugin) succeeds. The ubuntu-22.04 runner
-      # ships cargo; this step is a no-op for non-Rust repos.
-      - name: Warm Cargo cache (Rust projects)
-        if: hashFiles('Cargo.toml') != ''
+      # Rust-only: code-ranker's Rust plugin reads the dependency graph via
+      # `cargo metadata --offline`, which needs cargo's local cache warm. Every
+      # other language walks the filesystem and needs no setup. Gated on the
+      # language input; the hashFiles fallback covers legacy auto-detect (empty
+      # input) and a multi-language repo's non-Rust jobs skip this entirely.
+      - name: Warm Cargo cache (Rust only)
+        if: inputs.language == 'rust' || (inputs.language == '' && hashFiles('Cargo.toml') != '')
         run: cargo fetch --manifest-path Cargo.toml
 
-      # Generate the report. A detached checkout in Actions loses git metadata,
-      # so branch/commit/origin are passed explicitly from Actions variables.
-      - name: Analyze -> HTML
+      # Analyze the repo ONCE -> JSON snapshot + HTML report in a single
+      # invocation (so `cargo metadata` runs at most once). The check gate below
+      # re-reads snap.json instead of re-analyzing. A detached checkout loses git
+      # metadata, so branch/commit/origin are passed explicitly.
+      - name: Analyze -> snapshot + HTML
+        # Report-only mode must never break the client's CI; gating mode lets a
+        # broken analysis fail the job.
+        continue-on-error: ${{ inputs.do_check != true }}
         env:
+          LANGUAGE: ${{ inputs.language }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          # short SHA, reused by the upload step to reference the same file
           H="$(git rev-parse --short=12 HEAD)"; echo "H=$H" >> "$GITHUB_ENV"
-          # GITHUB_HEAD_REF is set only for pull_request (the PR head branch);
-          # for push it is empty, so fall back to GITHUB_REF_NAME.
           BR="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          PLUGIN_ARG=()
+          [ -n "$LANGUAGE" ] && PLUGIN_ARG=(--plugin="$LANGUAGE")
           code-ranker report . \
+            "${PLUGIN_ARG[@]}" \
             --git.branch="$BR" \
             --git.commit="${PR_HEAD_SHA:-$GITHUB_SHA}" \
             --git.dirty-files=0 \
             --git.origin="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --output.json.path="snap.json" \
             --output.html.path="report-${H}.html"
 
-      # Compute the violations count for the README badge / upload metadata.
-      # `check` may exit non-zero when violations exist; never let that fail the
-      # job (|| true). JSON output is either an array of violations or an object
-      # { verdict, violations: [...] }; jq handles both and counts the array.
+      # Violations count for the badge / upload metadata, derived from the SAME
+      # snapshot (no re-analysis). --exit-zero so the verdict never fails this
+      # advisory step.
       - name: Count violations
+        if: inputs.do_report
+        continue-on-error: true
         run: |
           set -uo pipefail
-          JSON="$(code-ranker check . --output-format json 2>/dev/null || true)"
+          JSON="$(code-ranker check snap.json --output-format json --exit-zero 2>/dev/null || true)"
           if [ -z "$JSON" ]; then
             VIOLATIONS=0
           else
@@ -99,62 +127,66 @@ jobs:
           fi
           echo "VIOLATIONS=${VIOLATIONS:-0}" >> "$GITHUB_ENV"
 
-      # Same-repo only: a fork PR gets NO id-token, so this step is skipped for
-      # forks (the `if` below is the safety net; the privileged fork path is a
-      # separate workflow_run handler -- see fork-report.yml).
+      # Same-repo only: fork PRs get NO id-token, so upload is skipped for forks
+      # (the privileged fork path is fork-report.yml). Advisory: continue-on-error.
       - name: Upload to code-ranker (OIDC, keyless)
         if: >-
-          github.event.pull_request.head.repo.full_name == github.repository
-          || github.event_name == 'push'
+          inputs.do_report &&
+          (github.event.pull_request.head.repo.full_name == github.repository
+           || github.event_name == 'push')
         id: up
+        continue-on-error: true
         env:
-          # input override wins; otherwise the env default placeholder above
           API_URL: ${{ inputs.api_url != '' && inputs.api_url || env.API_UPLOAD_URL }}
+          LANGUAGE: ${{ inputs.language }}
         run: |
           set -euo pipefail
-          # 1) request an OIDC token with OUR custom audience. The two env vars
-          #    below are exposed by GitHub ONLY when the job has id-token: write.
-          #    The URL already carries query params, so audience is added with &.
+          # 1) request an OIDC token with OUR custom audience (env vars exposed
+          #    only when the job has id-token: write).
           TOKEN=$(curl -sS \
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=code-ranker-reports" \
             | jq -r .value)
-          # 2) POST the HTML + JWT. Capture body + HTTP status so we can surface
-          #    a clear, actionable error when the account isn't activated.
+          # 2) POST the HTML + JWT, capturing body + HTTP status.
           OUT=$(curl -sS -w $'\n%{http_code}' -X POST "$API_URL" \
             -H "Authorization: Bearer $TOKEN" \
             -F "pr=${{ github.event.pull_request.number }}" \
-            -F "violations=${VIOLATIONS}" \
+            -F "language=${LANGUAGE:-}" \
+            -F "violations=${VIOLATIONS:-0}" \
             -F "report=@report-${H}.html;type=text/html")
           CODE="${OUT##*$'\n'}"; BODY="${OUT%$'\n'*}"
           if [ "$CODE" = "200" ]; then
             URL=$(printf '%s' "$BODY" | jq -r .url)
             echo "url=$URL" >> "$GITHUB_OUTPUT"
           elif [ "$CODE" = "403" ] && printf '%s' "$BODY" | jq -e '.error=="needs_email_verification"' >/dev/null 2>&1; then
-            # Account not activated -> loud, actionable error in the job log.
             MSG=$(printf '%s' "$BODY" | jq -r '.message')
             DASH=$(printf '%s' "$BODY" | jq -r '.dashboard_url')
             echo "::error title=code-ranker not activated::${MSG} Activate here: ${DASH}"
             echo "verify_url=${DASH}" >> "$GITHUB_OUTPUT"
-            exit 1   # fails this step; the job is continue-on-error so the build stays green
           else
             echo "::warning title=code-ranker upload failed::HTTP ${CODE}: ${BODY}"
           fi
 
-      # Comment only on PRs and only when an upload actually returned a URL, so
-      # a skipped (fork) or failed upload never posts a broken link. Updates the
-      # same comment in place by header instead of spamming a new one per push.
+      # Comment only on PRs and only when an upload returned a URL. Per-language
+      # header so each language updates its own comment instead of overwriting.
       - name: Sticky comment
-        if: github.event_name == 'pull_request' && steps.up.outputs.url != ''
+        if: github.event_name == 'pull_request' && inputs.comment && steps.up.outputs.url != ''
         uses: marocchino/sticky-pull-request-comment@v2
         with:
-          header: code-ranker
-          message: "code-ranker report: ${{ steps.up.outputs.url }}"
+          header: code-ranker-${{ inputs.language }}
+          message: "code-ranker (${{ inputs.language || 'report' }}) report: ${{ steps.up.outputs.url }}"
 
-      # If the account isn't activated, nudge in the PR with the activation link.
       - name: Sticky comment (activate)
-        if: github.event_name == 'pull_request' && steps.up.outputs.verify_url != ''
+        if: github.event_name == 'pull_request' && inputs.comment && steps.up.outputs.verify_url != ''
         uses: marocchino/sticky-pull-request-comment@v2
         with:
-          header: code-ranker
+          header: code-ranker-${{ inputs.language }}
           message: "🔒 code-ranker is set up but not activated. Activate your email to publish reports: ${{ steps.up.outputs.verify_url }}"
+
+      # Lint gate (do_check=true). Reads the SAME snapshot (no re-analysis, no
+      # second cargo metadata) and emits GitHub annotations; a non-zero exit on
+      # violations turns this job RED so it can be a required status check. Runs
+      # LAST so the advisory report/comment above are already posted.
+      - name: Check (lint gate)
+        if: inputs.do_check
+        run: code-ranker check snap.json --output-format github

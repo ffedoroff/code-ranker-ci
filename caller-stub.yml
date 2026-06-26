@@ -1,38 +1,59 @@
 # .github/workflows/code-ranker.yml
 #
-# Thin caller stub. Copy this into your repository as
-# `.github/workflows/code-ranker.yml`. This is the EXACT file the code-ranker
-# onboarding PR adds for you -- all real logic lives in the reusable workflow
-# pinned at @v1, so you never have to touch it again. We ship updates by moving
-# the v1 tag.
+# Thin caller stub. This is the EXACT file the code-ranker onboarding PR adds for
+# you -- all real logic lives in the reusable workflow pinned at @v1, so you never
+# edit it. We ship updates by moving the v1 tag.
+#
+# The onboarding PR fills `matrix.language` with the languages it detected in your
+# repo that code-ranker supports (one job per language). The list below is just an
+# example -- yours will match your repo.
 #
 # No secrets are required: identity is proven via keyless OIDC.
 name: code-ranker
 on:
   pull_request:
   push:
-    branches: [main]
 jobs:
-  report:
+  code-ranker:
+    # Run on every PR, and on pushes to the default branch only. GitHub forbids
+    # expressions in `on:`, so we trigger on all pushes and gate here instead --
+    # this self-heals if the default branch is ever renamed.
+    if: github.event_name == 'pull_request' || github.ref_name == github.event.repository.default_branch
+    strategy:
+      fail-fast: false          # one language failing must not cancel the others
+      matrix:
+        language: [rust, javascript, markdown]   # filled by the onboarding PR
     uses: ffedoroff/code-ranker-ci/.github/workflows/report.yml@v1
+    with:
+      language: ${{ matrix.language }}
+      do_report: true           # advisory HTML report (never fails CI)
+      do_check: true            # lint gate: red job on violations (see note below)
     permissions:
-      id-token: write        # OIDC, keyless -- no secret needed
-      contents: read         # checkout your code for analysis
-      pull-requests: write   # sticky comment with the report link
+      id-token: write           # OIDC, keyless -- no secret needed
+      contents: read            # checkout your code for analysis
+      pull-requests: write      # sticky comment with the report link
 
+# -----------------------------------------------------------------------------
+# do_check / branch protection
+# -----------------------------------------------------------------------------
+# With `do_check: true`, a language's job goes RED when code-ranker finds
+# violations. This shows a failing check on the PR but does NOT block merging
+# unless you mark `code-ranker (<language>)` as a REQUIRED status check in your
+# branch protection / ruleset. Set `do_check: false` to keep a language advisory.
+#
 # -----------------------------------------------------------------------------
 # OPTIONAL: fork-PR support
 # -----------------------------------------------------------------------------
-# Fork PRs cannot get an OIDC id-token, so the reusable workflow above cannot
-# upload directly for them. To support fork PRs you need TWO extra pieces:
+# Fork PRs cannot get an OIDC id-token, so the report cannot be uploaded for them
+# (the check gate still runs locally). To support uploads from fork PRs you need
+# TWO extra pieces:
 #
-#   1) A phase-A step in this same workflow that, for fork PRs, publishes the
-#      generated HTML as an ORDINARY artifact (no OIDC, no secrets). Because the
-#      analysis runs inside the reusable workflow, the simplest way to add this
-#      is to NOT use `uses:` for the report job and instead inline the steps;
-#      most users do not need fork support and can ignore this section.
+#   1) A phase-A step that, for fork PRs, publishes the generated HTML as an
+#      ORDINARY artifact (no OIDC, no secrets). Because the analysis runs inside
+#      the reusable workflow, the simplest way is to NOT use `uses:` for the job
+#      and inline the steps; most users do not need fork support.
 #
-#      If you do inline the job, append these two steps after the analysis step
+#      If you inline the job, append these two steps after the analysis step
 #      (they only fire for fork PRs, where the same-repo upload was skipped):
 #
 #        - name: Stage fork-PR report
