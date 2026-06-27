@@ -128,10 +128,10 @@ KIND="${REPORT_KIND:-report}"
     echo "</details>"
     echo
   fi
-  # Text "button" (GitHub strips CSS background, so a <kbd> keycap is the
-  # text-only button; an image badge would be needed for a true black fill).
+  # Bigger text "button" as an <h3> link, with target=_blank to open the report in
+  # a new tab (GitHub may strip target on sanitize; then it opens in the same tab).
   if [ -n "${URL:-}" ]; then
-    echo "[<kbd> View ${LANGUAGE} ${KIND} </kbd>](${URL})"
+    echo "<h3><a href=\"${URL}\" target=\"_blank\" rel=\"noopener noreferrer\">⬇ View ${LANGUAGE} ${KIND}</a></h3>"
   elif [ -n "${VERIFY:-}" ]; then
     echo "🔒 [Activate to publish reports](${VERIFY})"
   fi
