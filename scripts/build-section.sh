@@ -131,7 +131,7 @@ KIND="${REPORT_KIND:-report}"
   # Bigger text "button" as an <h3> link, with target=_blank to open the report in
   # a new tab (GitHub may strip target on sanitize; then it opens in the same tab).
   if [ -n "${URL:-}" ]; then
-    echo "<h3><a href=\"${URL}\" target=\"_blank\" rel=\"noopener noreferrer\">⬇ View ${LANGUAGE} ${KIND}</a></h3>"
+    echo "<h3><a href=\"${URL}\" target=\"_blank\" rel=\"noopener noreferrer\">View ${LANGUAGE} ${KIND} ↗</a></h3>"
   elif [ -n "${VERIFY:-}" ]; then
     echo "🔒 [Activate to publish reports](${VERIFY})"
   fi
