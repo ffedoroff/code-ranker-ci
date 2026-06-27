@@ -63,6 +63,8 @@ branchlink() { # $1 snapshot $2 fallback-label -> "[label](origin/tree/branch)" 
 }
 
 CDATE="$(fmtdate "$(jq -r '.generated_at // ""' snap.json 2>/dev/null)")"
+CORIGIN="$(jq -r '.git.origin // ""' snap.json 2>/dev/null)"
+CCOMMIT="$(jq -r '.git.commit // ""' snap.json 2>/dev/null)"
 
 if [ -f baseline/snap.json ]; then
   DIFF="$(jq -rn \
@@ -102,17 +104,29 @@ KIND="${REPORT_KIND:-report}"
 {
   echo "<details><summary>${SUMMARY}</summary>"
   echo
+  # Violations in a spoiler. Each is a link to the file at the current commit
+  # (+ line anchor when known).
   if [ "${N}" -gt 0 ] 2>/dev/null; then
-    echo "**Violations**"
-    jq -r '(if type=="array" then . else .violations end)[]
-           | "- `\(.location | sub("^\\{target\\}/";""))\(if .line then ":"+(.line|tostring) else "" end)` — \(.message | gsub("\\{target\\}/";""))"' \
-       viol.json 2>/dev/null | head -20
+    echo "<details><summary>Violations: ${N}</summary>"
+    echo
+    jq -r --arg origin "$CORIGIN" --arg sha "$CCOMMIT" '
+      (if type=="array" then . else .violations end)[]
+      | (.location | sub("^\\{target\\}/";"")) as $loc
+      | (if .line then ":"+(.line|tostring) else "" end) as $ln
+      | (if .line then "#L"+(.line|tostring) else "" end) as $anchor
+      | (.message | gsub("\\{target\\}/";"")) as $msg
+      | (if ($origin != "" and $sha != "")
+         then "[\($loc)\($ln)](\($origin)/blob/\($sha)/\($loc)\($anchor))"
+         else "`\($loc)\($ln)`" end) as $link
+      | "- \($link) — \($msg)"' viol.json 2>/dev/null | head -20
+    echo
+    echo "</details>"
     echo
   fi
   # Text "button" (GitHub strips CSS background, so a <kbd> keycap is the
   # text-only button; an image badge would be needed for a true black fill).
   if [ -n "${URL:-}" ]; then
-    echo "[<kbd> ▶ View ${LANGUAGE} ${KIND} </kbd>](${URL})"
+    echo "[<kbd> View ${LANGUAGE} ${KIND} </kbd>](${URL})"
   elif [ -n "${VERIFY:-}" ]; then
     echo "🔒 [Activate to publish reports](${VERIFY})"
   fi
@@ -120,15 +134,6 @@ KIND="${REPORT_KIND:-report}"
   echo "<sub>${INFO}</sub>"
   echo
   echo "$DIFF"
-  # When there are violations, add a nested collapsed AI fix prompt.
-  if [ "${N}" -gt 0 ] 2>/dev/null; then
-    echo
-    echo "<details><summary>🤖 Prompt for fix all with AI</summary>"
-    echo
-    echo "Run \`code-ranker check --top 1\` and follow instructions to fix error. Loop until no errors left."
-    echo
-    echo "</details>"
-  fi
   echo
   echo "</details>"
 } > "ck-comment/${LANGUAGE}.md"

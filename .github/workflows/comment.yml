@@ -53,6 +53,14 @@ jobs:
             for f in $(printf '%s\n' "${files[@]}" | sort); do
               cat "$f"; echo
             done
+            # Single AI fix prompt at the very bottom, only when something failed.
+            if [ "$TOTAL" -gt 0 ]; then
+              echo "<details><summary>🤖 Prompt for fix all with AI</summary>"
+              echo
+              echo "Run \`code-ranker check --top 1\` and follow instructions to fix error. Loop until no errors left."
+              echo
+              echo "</details>"
+            fi
           } > comment.md
           {
             echo "has_any=true"
