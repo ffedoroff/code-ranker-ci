@@ -110,15 +110,20 @@ KIND="${REPORT_KIND:-report}"
     echo "<details><summary>Violations: ${N}</summary>"
     echo
     jq -r --arg origin "$CORIGIN" --arg sha "$CCOMMIT" '
-      (if type=="array" then . else .violations end)[]
+      (($origin != "") and ($sha != "")) as $havelink
+      | (if type=="array" then . else .violations end)[]
       | (.location | sub("^\\{target\\}/";"")) as $loc
       | (if .line then ":"+(.line|tostring) else "" end) as $ln
       | (if .line then "#L"+(.line|tostring) else "" end) as $anchor
-      | (.message | gsub("\\{target\\}/";"")) as $msg
-      | (if ($origin != "" and $sha != "")
-         then "[\($loc)\($ln)](\($origin)/blob/\($sha)/\($loc)\($anchor))"
-         else "`\($loc)\($ln)`" end) as $link
-      | "- \($link) — \($msg)"' viol.json 2>/dev/null | head -20
+      # location -> link to the file at this commit
+      | (if $havelink then "[\($loc)\($ln)](\($origin)/blob/\($sha)/\($loc)\($anchor))"
+         else "`\($loc)\($ln)`" end) as $loclink
+      # message -> linkify every {target}/<file> token it mentions
+      | (.message
+         | if $havelink
+           then gsub("\\{target\\}/(?<p>[^\\s]+)"; "[\(.p)](" + $origin + "/blob/" + $sha + "/" + .p + ")")
+           else gsub("\\{target\\}/"; "") end) as $msg
+      | "- \($loclink) — \($msg)"' viol.json 2>/dev/null | head -20
     echo
     echo "</details>"
     echo
