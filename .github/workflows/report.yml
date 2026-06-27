@@ -102,6 +102,9 @@ jobs:
             --git.branch="$BR" --git.commit="${PR_HEAD_SHA:-$GITHUB_SHA}" \
             --git.dirty-files=0 --git.origin="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --output.json.path="snap.json" --output.html.path="report-${H}.html"
+          # default: plain report; a diff is rendered below when a baseline exists
+          echo "REPORT_FILE=report-${H}.html" >> "$GITHUB_ENV"
+          echo "REPORT_KIND=report" >> "$GITHUB_ENV"
 
       # Restore the default-branch baseline snapshot for this language. restore-keys
       # prefix gets the most recent one in scope (a feature branch / PR sees the
@@ -138,6 +141,23 @@ jobs:
           fi
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
 
+      # When a compatible baseline exists, re-render the HTML as a DIFF report from
+      # the two snapshots (no re-analysis; --baseline emits a *-diff.html). The
+      # download button then offers the diff instead of the plain report.
+      - name: Render diff report
+        if: steps.ver_check.outputs.skip != 'true'
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if [ -f baseline/snap.json ]; then
+            code-ranker report snap.json --baseline baseline/snap.json \
+              --output.html.path="report-${H}.html" >/dev/null 2>&1 || true
+            if [ -f "report-${H}-diff.html" ]; then
+              echo "REPORT_FILE=report-${H}-diff.html" >> "$GITHUB_ENV"
+              echo "REPORT_KIND=diff report" >> "$GITHUB_ENV"
+            fi
+          fi
+
       # Violations from the SAME snapshot (no re-analysis). --exit-zero so this
       # advisory step never fails. count -> summary line; list -> comment body.
       - name: Collect violations
@@ -169,7 +189,7 @@ jobs:
             -F "pr=${{ github.event.pull_request.number }}" \
             -F "language=${LANGUAGE:-}" \
             -F "violations=${{ steps.viol.outputs.count }}" \
-            -F "report=@report-${H}.html;type=text/html")
+            -F "report=@${REPORT_FILE};type=text/html")
           CODE="${OUT##*$'\n'}"; BODY="${OUT%$'\n'*}"
           if [ "$CODE" = "200" ]; then
             echo "url=$(printf '%s' "$BODY" | jq -r .url)" >> "$GITHUB_OUTPUT"

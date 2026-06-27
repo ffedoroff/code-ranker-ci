@@ -106,9 +106,14 @@ mkdir -p ck-comment
     echo
   fi
   if [ -n "${URL:-}" ]; then
-    echo "[report](${URL})"
+    # Big dark "button" via a shields.io badge image wrapped in a link (CodeRabbit
+    # style). Label says the language and whether it's a diff or plain report.
+    KIND="${REPORT_KIND:-report}"
+    LBL="⬇ Download ${LANGUAGE} ${KIND}"
+    ENC="$(printf '%s' "$LBL" | sed 's/ /%20/g')"
+    echo "[![${LBL}](https://img.shields.io/badge/${ENC}-1f2328?style=for-the-badge)](${URL})"
   elif [ -n "${VERIFY:-}" ]; then
-    echo "🔒 [activate](${VERIFY})"
+    echo "🔒 [Activate to publish reports](${VERIFY})"
   fi
   echo
   echo "$DIFF"
@@ -116,15 +121,9 @@ mkdir -p ck-comment
   # Basic placeholder prompt for now (to be refined later).
   if [ "${N}" -gt 0 ] 2>/dev/null; then
     echo
-    echo "<details><summary>Prompt for fix</summary>"
+    echo "<details><summary>🤖 Prompt for fix all with AI</summary>"
     echo
-    echo "Fix the following code-ranker violations in the ${LANGUAGE} code without changing behavior:"
-    echo
-    jq -r '(if type=="array" then . else .violations end)[]
-           | "- `\(.location | sub("^\\{target\\}/";""))\(if .line then ":"+(.line|tostring) else "" end)` — \(.message | gsub("\\{target\\}/";""))"' \
-       viol.json 2>/dev/null | head -20
-    echo
-    echo "Keep the changes minimal and explain each fix."
+    echo "Run \`code-ranker check --top 1\` and follow instructions to fix error. Loop until no errors left."
     echo
     echo "</details>"
   fi
