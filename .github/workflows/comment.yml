@@ -36,30 +36,23 @@ jobs:
           if [ ${#files[@]} -eq 0 ]; then
             echo "has_any=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          # Single footer line (small, with link + timestamps) built once from any
-          # language's meta — all share the same baseline commit. ISO -> "YYYY-MM-DD HH:MM UTC".
-          metas=(ck-comment/*.meta.json)
-          FOOTER="$(jq -rs '
-            def d(s): if (s|type)=="string" and (s|length)>=16 then (s[0:16]|sub("T";" "))+" UTC" else "" end;
-            (map(select(.sha != "")) | .[0]) as $m
-            | (.[0].cdate // "") as $cdate
-            | if $m then
-                (if ($m.origin != "" and $m.sha != "")
-                 then "[`\($m.ref) @\($m.sha[0:7])`](\($m.origin)/commit/\($m.sha))"
-                 else "`\($m.ref) @\($m.sha[0:7])`" end) as $link
-                | "avg · vs \($link)"
-                  + (if d($m.bdate) != "" then " · baseline \(d($m.bdate))" else "" end)
-                  + (if d($cdate) != "" then " · updated \(d($cdate))" else "" end)
-              else
-                (if d($cdate) != "" then "updated \(d($cdate))" else "one comment per PR" end)
-              end' "${metas[@]}" 2>/dev/null || echo "one comment per PR")"
+          # Total violations across languages -> header "ok" / "N error(s) ❌".
+          TOTAL=0
+          for n in ck-comment/*.n; do
+            [ -f "$n" ] && TOTAL=$((TOTAL + $(tr -dc '0-9' < "$n")))
+          done
+          if [ "$TOTAL" -gt 0 ]; then
+            W=errors; [ "$TOTAL" -eq 1 ] && W=error
+            HEAD="code-ranker: ${TOTAL} ${W} ❌"
+          else
+            HEAD="code-ranker: ok"
+          fi
           {
-            echo "## code-ranker"
+            echo "## ${HEAD}"
             echo
             for f in $(printf '%s\n' "${files[@]}" | sort); do
               cat "$f"; echo
             done
-            echo "<sub>${FOOTER}</sub>"
           } > comment.md
           {
             echo "has_any=true"

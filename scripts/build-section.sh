@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# Builds one language's <details> section for the PR comment / job summary, plus a
-# small meta file the aggregator uses for the single footer line.
+# Builds one language's <details> section for the PR comment / job summary.
 # Reads (cwd): snap.json (current), baseline/snap.json (optional), viol.json.
-# Env: LANGUAGE, N (violation count), URL (report url), VERIFY (activation url).
-# Writes: ck-comment/<LANGUAGE>.md  and  ck-comment/<LANGUAGE>.meta.json
+# Env: LANGUAGE, N (violation count), URL (report url), VERIFY (activation url),
+#      REPORT_KIND ("diff report" | "report").
+# Writes: ck-comment/<LANGUAGE>.md
 #
 # The stat-diff mirrors the HTML report's summary: a "sum always" section of
 # structural counts followed by per-metric avg sections, with a green/red colour
 # (inline math \color) driven by each metric's direction. Labels/groups/directions
 # are read from the snapshot — nothing about the metric set is hardcoded here (see
-# difftable.jq). The "avg · vs <ref>" caption + timestamp is written ONCE by the
-# aggregator (comment.yml) from the meta file, not per language.
+# difftable.jq). Schema-major compatibility is checked by the workflow's ver_check
+# step before this runs.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LANGUAGE="${LANGUAGE:-report}"
 N="${N:-0}"
+mkdir -p ck-comment
+
+# ISO8601 -> "YYYY-MM-DD HH:MM UTC"
+fmtdate() { local s="$1"; if [ "${#s}" -ge 16 ]; then echo "${s:0:10} ${s:11:5} UTC"; else echo "$s"; fi; }
 
 statsof() { jq -c '(.graphs | to_entries[0].value).stats // {}' "$1"; }
 metaof()  { jq -c '(.graphs | to_entries[0].value).node_attributes // {}' "$1"; }
@@ -47,9 +51,6 @@ countrows() { # $1 baseline $2 current -> [{label,b,c,dir}]
     | map(select(.b != null and .c != null)) '
 }
 
-mkdir -p ck-comment
-CDATE="$(jq -r '.generated_at // ""' snap.json 2>/dev/null)"
-
 branchlink() { # $1 snapshot $2 fallback-label -> "[label](origin/tree/branch)" or label
   local origin branch
   origin="$(jq -r '.git.origin // ""' "$1")"
@@ -61,6 +62,8 @@ branchlink() { # $1 snapshot $2 fallback-label -> "[label](origin/tree/branch)" 
   fi
 }
 
+CDATE="$(fmtdate "$(jq -r '.generated_at // ""' snap.json 2>/dev/null)")"
+
 if [ -f baseline/snap.json ]; then
   DIFF="$(jq -rn \
     --argjson counts "$(countrows baseline/snap.json snap.json)" \
@@ -71,20 +74,20 @@ if [ -f baseline/snap.json ]; then
     --arg     bhdr   "$(branchlink baseline/snap.json Baseline)" \
     --arg     chdr   "$(branchlink snap.json Current)" \
     -f "$HERE/difftable.jq")"
-  # meta for the single footer (all languages share the same baseline commit)
-  jq -n \
-    --arg ref    "$(jq -r '.git.branch // "baseline"' baseline/snap.json)" \
-    --arg sha    "$(jq -r '(.git.commit // "")' baseline/snap.json)" \
-    --arg origin "$(jq -r '.git.origin // ""' baseline/snap.json)" \
-    --arg bdate  "$(jq -r '.generated_at // ""' baseline/snap.json)" \
-    --arg cdate  "$CDATE" \
-    '{ref:$ref, sha:$sha, origin:$origin, bdate:$bdate, cdate:$cdate}' \
-    > "ck-comment/${LANGUAGE}.meta.json" 2>/dev/null || true
+  # "baseline <ref> @<sha> <date> · updated <date>" line, shown under the button.
+  BREF="$(jq -r '.git.branch // "baseline"' baseline/snap.json)"
+  BCOMMIT="$(jq -r '.git.commit // ""' baseline/snap.json)"
+  BORIGIN="$(jq -r '.git.origin // ""' baseline/snap.json)"
+  BDATE="$(fmtdate "$(jq -r '.generated_at // ""' baseline/snap.json)")"
+  if [ -n "$BORIGIN" ] && [ -n "$BCOMMIT" ]; then
+    BLINK="[${BREF} @${BCOMMIT:0:7}](${BORIGIN}/commit/${BCOMMIT})"
+  else
+    BLINK="${BREF} @${BCOMMIT:0:7}"
+  fi
+  INFO="baseline ${BLINK} ${BDATE} · updated ${CDATE}"
 else
   DIFF="_No baseline yet._"
-  mkdir -p ck-comment
-  jq -n --arg cdate "$CDATE" '{ref:"", sha:"", origin:"", bdate:"", cdate:$cdate}' \
-    > "ck-comment/${LANGUAGE}.meta.json" 2>/dev/null || true
+  INFO="updated ${CDATE}"
 fi
 
 if [ "${N}" -gt 0 ] 2>/dev/null; then
@@ -94,7 +97,8 @@ else
   SUMMARY="${LANGUAGE}"
 fi
 
-mkdir -p ck-comment
+KIND="${REPORT_KIND:-report}"
+
 {
   echo "<details><summary>${SUMMARY}</summary>"
   echo
@@ -105,20 +109,18 @@ mkdir -p ck-comment
        viol.json 2>/dev/null | head -20
     echo
   fi
+  # Text "button" (GitHub strips CSS background, so a <kbd> keycap is the
+  # text-only button; an image badge would be needed for a true black fill).
   if [ -n "${URL:-}" ]; then
-    # Big dark "button" via a shields.io badge image wrapped in a link (CodeRabbit
-    # style). Label says the language and whether it's a diff or plain report.
-    KIND="${REPORT_KIND:-report}"
-    LBL="⬇ Download ${LANGUAGE} ${KIND}"
-    ENC="$(printf '%s' "$LBL" | sed 's/ /%20/g')"
-    echo "[![${LBL}](https://img.shields.io/badge/${ENC}-1f2328?style=for-the-badge)](${URL})"
+    echo "[<kbd> ▶ View ${LANGUAGE} ${KIND} </kbd>](${URL})"
   elif [ -n "${VERIFY:-}" ]; then
     echo "🔒 [Activate to publish reports](${VERIFY})"
   fi
   echo
+  echo "<sub>${INFO}</sub>"
+  echo
   echo "$DIFF"
-  # When there are violations, add a nested collapsed "Prompt for fix" section.
-  # Basic placeholder prompt for now (to be refined later).
+  # When there are violations, add a nested collapsed AI fix prompt.
   if [ "${N}" -gt 0 ] 2>/dev/null; then
     echo
     echo "<details><summary>🤖 Prompt for fix all with AI</summary>"
@@ -130,3 +132,6 @@ mkdir -p ck-comment
   echo
   echo "</details>"
 } > "ck-comment/${LANGUAGE}.md"
+
+# Violation count for the aggregator's header total (code-ranker: ok / N errors).
+echo "${N}" > "ck-comment/${LANGUAGE}.n"
