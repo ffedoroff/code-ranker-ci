@@ -15,23 +15,38 @@ on:
   push:
 jobs:
   code-ranker:
-    # Run on every PR, and on pushes to the default branch only. GitHub forbids
-    # expressions in `on:`, so we trigger on all pushes and gate here instead --
-    # this self-heals if the default branch is ever renamed.
-    if: github.event_name == 'pull_request' || github.ref_name == github.event.repository.default_branch
+    name: code-ranker (${{ matrix.language }})   # clean per-language check name
+    # Runs on every PR and on pushes to ANY branch, so stat-diffs build on feature
+    # branches too. The diff baseline is the default-branch snapshot, refreshed by
+    # report.yml on default-branch pushes and read everywhere via the Actions cache.
     strategy:
       fail-fast: false          # one language failing must not cancel the others
       matrix:
-        language: [rust, javascript, markdown]   # filled by the onboarding PR
+        # One editable line per language: flip do_check to false to make a
+        # language advisory-only, or pr_comment to false to drop it from the PR
+        # comment. Filled by the onboarding PR from detected languages.
+        include:
+          - { language: rust,       do_report: true, do_check: true, pr_comment: true }
+          - { language: javascript, do_report: true, do_check: true, pr_comment: true }
+          - { language: markdown,   do_report: true, do_check: true, pr_comment: true }
     uses: ffedoroff/code-ranker-ci/.github/workflows/report.yml@v1
     with:
       language: ${{ matrix.language }}
-      do_report: true           # advisory HTML report (never fails CI)
-      do_check: true            # lint gate: red job on violations (see note below)
+      do_report: ${{ matrix.do_report }}     # advisory HTML report (never fails CI)
+      do_check: ${{ matrix.do_check }}       # lint gate: red job on violations (see note)
+      pr_comment: ${{ matrix.pr_comment }}   # contribute to the single PR comment
     permissions:
       id-token: write           # OIDC, keyless -- no secret needed
       contents: read            # checkout your code for analysis
       pull-requests: write      # sticky comment with the report link
+  # Aggregates every language's result into ONE PR comment (updated in place).
+  comment:
+    needs: code-ranker
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    uses: ffedoroff/code-ranker-ci/.github/workflows/comment.yml@v1
+    permissions:
+      pull-requests: write      # post / update the single comment
+      actions: read             # download the per-language staged artifacts
 
 # -----------------------------------------------------------------------------
 # do_check / branch protection

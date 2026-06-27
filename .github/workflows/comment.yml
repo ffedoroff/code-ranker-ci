@@ -1,0 +1,60 @@
+# ffedoroff/code-ranker-ci :: .github/workflows/comment.yml
+#
+# Aggregator: after all per-language report.yml jobs finish, this single job
+# collects each language's pre-rendered markdown section (uploaded as
+# `ck-comment-<lang>` artifacts) and posts ONE sticky PR comment. Matrix report
+# jobs run in parallel and isolated, so they stage sections; this job merges them.
+# Result: at most one code-ranker comment per PR, updated in place every run.
+#
+# The caller runs this with `needs: <report-job>` and `if: always()` so the
+# comment posts even when a language's check gate is red.
+name: code-ranker comment
+
+on:
+  workflow_call:
+
+jobs:
+  comment:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    steps:
+      # Pull every language's staged section from this run (merge-multiple flattens
+      # all ck-comment-* artifacts into one dir). None -> nothing to post.
+      - name: Download staged sections
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ck-comment-*
+          path: ck-comment
+          merge-multiple: true
+
+      - name: Assemble comment
+        id: body
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          files=(ck-comment/*.md)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "has_any=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          {
+            echo "## code-ranker"
+            echo
+            for f in $(printf '%s\n' "${files[@]}" | sort); do
+              cat "$f"; echo
+            done
+            echo "<sub>Updated for the latest commit · one comment per PR</sub>"
+          } > comment.md
+          {
+            echo "has_any=true"
+            echo "body<<CK_EOF"
+            cat comment.md
+            echo "CK_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Single comment, fixed header -> created once, updated in place forever.
+      - name: Sticky comment (single)
+        if: steps.body.outputs.has_any == 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: code-ranker
+          message: ${{ steps.body.outputs.body }}
