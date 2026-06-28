@@ -51,11 +51,6 @@ on:
         required: false
         type: boolean
         default: false
-      api_url:
-        description: Optional override for the upload endpoint.
-        required: false
-        type: string
-        default: ""
 
 env:
   API_UPLOAD_URL: "https://api.code-ranker.com/upload"
@@ -197,14 +192,12 @@ jobs:
            || github.event_name == 'push')
         id: up
         continue-on-error: true
-        env:
-          API_URL: ${{ inputs.api_url != '' && inputs.api_url || env.API_UPLOAD_URL }}
         run: |
           set -euo pipefail
           TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=code-ranker-reports" | jq -r .value)
           N=$(jq 'if type=="array" then length else (.violations|length) end' viol.json 2>/dev/null || echo 0)
-          OUT=$(curl -sS -w $'\n%{http_code}' -X POST "$API_URL" \
+          OUT=$(curl -sS -w $'\n%{http_code}' -X POST "$API_UPLOAD_URL" \
             -H "Authorization: Bearer $TOKEN" \
             -F "pr=${{ github.event.pull_request.number }}" \
             -F "violations=${N:-0}" \
