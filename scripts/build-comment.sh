@@ -55,8 +55,21 @@ langs="$(jq -rn --slurpfile a snap.json --slurpfile b baseline/snap.json \
   '([($a[0].languages // {}|keys[]), ($b[0].languages // {}|keys[])] | add | unique)[]' 2>/dev/null \
   || jq -r '.languages // {} | keys[]' snap.json)"
 
-# Header
-if [ "${TOTAL:-0}" -gt 0 ] 2>/dev/null; then
+# Header. With a baseline, $VERDICT (improved/degraded/neutral) drives it and
+# TOTAL is the count of NEW violations; without a baseline it's a review (ok/N).
+case "${VERDICT:-}" in
+  improved) VE="🟢 improved" ;;
+  degraded) VE="🔴 degraded" ;;
+  neutral)  VE="➖ neutral" ;;
+  *)        VE="" ;;
+esac
+if [ -n "$VE" ]; then
+  if [ "${TOTAL:-0}" -gt 0 ] 2>/dev/null; then
+    W=new; HEAD="code-ranker: ${VE} · ${TOTAL} ${W} ❌"
+  else
+    HEAD="code-ranker: ${VE}"
+  fi
+elif [ "${TOTAL:-0}" -gt 0 ] 2>/dev/null; then
   W=errors; [ "$TOTAL" -eq 1 ] && W=error
   HEAD="code-ranker: ${TOTAL} ${W} ❌"
 else

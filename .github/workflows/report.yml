@@ -95,9 +95,22 @@ jobs:
           code-ranker report . \
             --git.branch="$BR" --git.commit="${PR_HEAD_SHA:-$GITHUB_SHA}" \
             --git.dirty-files=0 --git.origin="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-            --output.json.path="snap.json" --output.html.path="report-${H}.html"
+            --output.json.path="snap.json" --output.html.path="report-${H}.html" \
+            --output.sarif.path="report-${H}.sarif"
           echo "REPORT_FILE=report-${H}.html" >> "$GITHUB_ENV"
           echo "REPORT_KIND=report" >> "$GITHUB_ENV"
+
+      # Inline alerts in the PR diff + Security → Code scanning. Same-repo only
+      # (fork PRs get a read-only token); advisory — a miss never fails the job.
+      - name: Upload SARIF to code scanning
+        if: >-
+          always() && hashFiles(format('report-{0}.sarif', env.H)) != '' &&
+          (github.event_name == 'push'
+           || github.event.pull_request.head.repo.full_name == github.repository)
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: report-${{ env.H }}.sarif
 
       # Default-branch baseline snapshot (single key; cache scope lets any branch/PR
       # read the default-branch cache). Empty on the first run -> diff "no baseline".
@@ -140,10 +153,21 @@ jobs:
           fi
 
       # Violations across all languages from the SAME snapshot (each carries a
-      # .language field). --exit-zero so this advisory step never fails.
+      # .language field). With a baseline, `check --baseline` returns
+      # {verdict, violations} where violations are only the NEW ones vs the
+      # baseline (regressions) — that drives the verdict line in the comment.
+      # Without a baseline, it's a plain array of the current violations (review).
+      # --exit-zero so this advisory step never fails.
       - name: Collect violations
         continue-on-error: true
-        run: code-ranker check snap.json --output-format json --exit-zero > viol.json 2>/dev/null || echo '[]' > viol.json
+        run: |
+          set -uo pipefail
+          if [ -f baseline/snap.json ]; then
+            code-ranker check snap.json --baseline baseline/snap.json --output-format json --exit-zero > viol.json 2>/dev/null || echo '{}' > viol.json
+            echo "VERDICT=$(jq -r '.verdict // ""' viol.json 2>/dev/null || echo '')" >> "$GITHUB_ENV"
+          else
+            code-ranker check snap.json --output-format json --exit-zero > viol.json 2>/dev/null || echo '[]' > viol.json
+          fi
 
       # Same-repo only: fork PRs get NO id-token. Advisory: continue-on-error.
       - name: Upload to code-ranker (OIDC, keyless)
@@ -214,7 +238,14 @@ jobs:
           key: ck-baseline-${{ github.sha }}
 
       # Lint gate: reds the job on violations (so it can be a required status
-      # check). Reads the SAME snapshot. Runs LAST so the comment is already posted.
+      # check). With a baseline it gates on REGRESSIONS only (relative ratchet:
+      # new violations vs the default branch); without one, on all current
+      # violations. Reads the SAME snapshot. Runs LAST so the comment is posted.
       - name: Check (lint gate)
         if: inputs.do_check
-        run: code-ranker check snap.json --output-format github
+        run: |
+          if [ -f baseline/snap.json ]; then
+            code-ranker check snap.json --baseline baseline/snap.json --output-format github
+          else
+            code-ranker check snap.json --output-format github
+          fi

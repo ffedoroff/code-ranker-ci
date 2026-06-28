@@ -18,9 +18,10 @@ jobs:
     # with:
     #   do_check: false     # set to make code-ranker advisory-only (never reds the job)
     permissions:
-      id-token: write        # OIDC, keyless -- no secret needed
-      contents: read         # checkout your code for analysis
-      pull-requests: write   # the single sticky comment with the report + diff
+      id-token: write          # OIDC, keyless -- no secret needed
+      contents: read           # checkout your code for analysis
+      pull-requests: write     # the single sticky comment with the report + diff
+      security-events: write   # upload SARIF to code scanning (inline PR alerts)
 
 # -----------------------------------------------------------------------------
 # do_check / branch protection
