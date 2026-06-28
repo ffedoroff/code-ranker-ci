@@ -15,8 +15,12 @@ on:
 jobs:
   code-ranker:
     uses: ffedoroff/code-ranker-ci/.github/workflows/report.yml@v1
-    # with:
-    #   do_check: false     # set to make code-ranker advisory-only (never reds the job)
+    # with:                 # all optional; defaults shown
+    #   do_report: true     # upload the HTML report (the View-report button)
+    #   do_check: true      # red the job on violations (false = advisory only)
+    #   pr_comment: true     # post the single sticky PR comment
+    #   sarif: true         # upload SARIF to code scanning (inline PR alerts)
+    #   runs_on: ubuntu-22.04
     permissions:
       id-token: write          # OIDC, keyless -- no secret needed
       contents: read           # checkout your code for analysis

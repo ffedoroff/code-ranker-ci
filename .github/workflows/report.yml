@@ -18,11 +18,31 @@ name: code-ranker
 on:
   workflow_call:
     inputs:
+      do_report:
+        description: Generate + keyless-upload the HTML report (the View-report button).
+        required: false
+        type: boolean
+        default: true
       do_check:
         description: Run the lint gate (non-zero exit reds the job). false = advisory only.
         required: false
         type: boolean
         default: true
+      pr_comment:
+        description: Post / update the single sticky PR comment.
+        required: false
+        type: boolean
+        default: true
+      sarif:
+        description: Upload SARIF to code scanning (inline PR alerts). Needs code scanning enabled.
+        required: false
+        type: boolean
+        default: true
+      runs_on:
+        description: Runner label for the job.
+        required: false
+        type: string
+        default: "ubuntu-22.04"
       install_from_source:
         description: >-
           Build code-ranker from the checked-out repo instead of downloading the
@@ -49,7 +69,7 @@ concurrency:
 
 jobs:
   code-ranker:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ inputs.runs_on }}
     # No job-level continue-on-error: advisory steps (render-diff/upload/comment)
     # opt out per-step; only the check gate (and a broken analysis) fail the job.
     # Permissions come from the CALLER stub: id-token: write, contents: read,
@@ -104,7 +124,7 @@ jobs:
       # (fork PRs get a read-only token); advisory — a miss never fails the job.
       - name: Upload SARIF to code scanning
         if: >-
-          always() && hashFiles(format('report-{0}.sarif', env.H)) != '' &&
+          always() && inputs.sarif && hashFiles(format('report-{0}.sarif', env.H)) != '' &&
           (github.event_name == 'push'
            || github.event.pull_request.head.repo.full_name == github.repository)
         continue-on-error: true
@@ -172,8 +192,9 @@ jobs:
       # Same-repo only: fork PRs get NO id-token. Advisory: continue-on-error.
       - name: Upload to code-ranker (OIDC, keyless)
         if: >-
-          github.event.pull_request.head.repo.full_name == github.repository
-          || github.event_name == 'push'
+          inputs.do_report &&
+          (github.event.pull_request.head.repo.full_name == github.repository
+           || github.event_name == 'push')
         id: up
         continue-on-error: true
         env:
@@ -215,7 +236,7 @@ jobs:
 
       # One sticky comment per PR, updated in place (fixed header).
       - name: Sticky comment
-        if: github.event_name == 'pull_request' && hashFiles('comment.md') != ''
+        if: github.event_name == 'pull_request' && inputs.pr_comment && hashFiles('comment.md') != ''
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: code-ranker
